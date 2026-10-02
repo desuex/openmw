@@ -967,6 +967,13 @@ void OMW::Engine::go()
 
     mEnvironment.setFrameRateLimit(Settings::video().mFramerateLimit);
 
+    if (!mBridgeListen.empty())
+    {
+        // Unreal writes the player's transform before each tick (fork stage R2). Synchronous physics applies it
+        // within the same frame; asynchronous physics would overwrite it with a result computed before the write.
+        Settings::physics().mAsyncNumThreads.set(0);
+    }
+
     prepareEngine();
 
 #ifdef _WIN32
@@ -1076,6 +1083,8 @@ void OMW::Engine::go()
                 continue;
             }
             dt = tick->mDt * timeManager.getSimulationTimeScale();
+            if (tick->mPlayer)
+                MWBridge::writePlayer(*tick->mPlayer);
         }
         else
         {

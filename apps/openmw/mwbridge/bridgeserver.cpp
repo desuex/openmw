@@ -221,6 +221,8 @@ namespace MWBridge
         std::uint64_t mBootstrapCounter = 0;
         std::uint64_t mWorldRevision = 1;
         bool mWarnedLongTick = false;
+        /// The active cells Unreal knows about: the bootstrap's, then each ActiveCellsChanged's.
+        std::vector<CellInfo> mActiveCells;
         const SessionId mSessionId = makeSessionId();
     };
 
@@ -474,6 +476,13 @@ namespace MWBridge
     void BridgeServer::Impl::handleQuit(const mwue::QuitSession& quit)
     {
         Log(Debug::Info) << "MWUE bridge: client quit (" << mwue::EnumNameQuitReason(quit.reason()) << ")";
+        if (mPhase == Phase::Synchronized)
+        {
+            const PlayerInfo player = readPlayer();
+            Log(Debug::Info) << "MWUE bridge: the player is at (" << player.mTransform.mPosition[0] << ", "
+                             << player.mTransform.mPosition[1] << ", " << player.mTransform.mPosition[2] << ") in ("
+                             << player.mCell.mX << ", " << player.mCell.mY << ")";
+        }
         flatbuffers::FlatBufferBuilder fbb;
         const auto payload = mwue::CreateSessionEnding(fbb, mwue::SessionEndReason::ClientQuit);
         send(fbb, mwue::Message::SessionEnding, payload, true);
@@ -503,13 +512,63 @@ namespace MWBridge
             mWarnedLongTick = true;
             dt = maxTickDt;
         }
-        return TickRequest{ tick.tick(), dt, tick.mode() == mwue::TickMode::Menu };
+        TickRequest request{ tick.tick(), dt, tick.mode() == mwue::TickMode::Menu, std::nullopt };
+        if (const auto* actors = tick.actors())
+        {
+            for (const mwue::ActorFacts* actor : *actors)
+            {
+                // R2 writes the player only; other actors follow with R3.
+                if (actor == nullptr || actor->entity() != playerEntityId || actor->transform() == nullptr)
+                    continue;
+                ActorFactsInfo facts;
+                const mwue::Transform& transform = *actor->transform();
+                facts.mPosition = { transform.position().x(), transform.position().y(), transform.position().z() };
+                facts.mRotation = { transform.rotation().x(), transform.rotation().y(), transform.rotation().z(),
+                    transform.rotation().w() };
+                if (const mwue::Vec3* velocity = actor->velocity())
+                    facts.mVelocity = { velocity->x(), velocity->y(), velocity->z() };
+                if (actor->view_pitch().has_value())
+                    facts.mViewPitch = *actor->view_pitch();
+                facts.mFlags = static_cast<std::uint32_t>(actor->flags());
+                request.mPlayer = facts;
+            }
+        }
+        return request;
     }
 
     void BridgeServer::Impl::tickDone(const TickRequest& tick)
     {
         if (mPhase != Phase::Synchronized)
             return; // the client left while the tick was simulated
+
+        // Outcomes precede TickDone (§12): report the cells that the tick activated or deactivated.
+        std::vector<CellInfo> cells = readActiveCells();
+        if (cells != mActiveCells)
+        {
+            std::vector<CellInfo> added;
+            std::vector<CellInfo> removed;
+            std::set_difference(
+                cells.begin(), cells.end(), mActiveCells.begin(), mActiveCells.end(), std::back_inserter(added));
+            std::set_difference(
+                mActiveCells.begin(), mActiveCells.end(), cells.begin(), cells.end(), std::back_inserter(removed));
+            flatbuffers::FlatBufferBuilder fbb;
+            std::vector<flatbuffers::Offset<mwue::CellId>> addedIds;
+            std::vector<flatbuffers::Offset<mwue::CellId>> removedIds;
+            for (const CellInfo& cell : added)
+                addedIds.push_back(makeCell(fbb, cell));
+            for (const CellInfo& cell : removed)
+                removedIds.push_back(makeCell(fbb, cell));
+            const auto payload = mwue::CreateActiveCellsChangedDirect(fbb, &addedIds, &removedIds);
+            send(fbb, mwue::Message::ActiveCellsChanged, payload, false, tick.mTick);
+
+            const PlayerInfo player = readPlayer();
+            Log(Debug::Info) << "MWUE bridge: active cells changed (" << added.size() << " added, " << removed.size()
+                             << " removed); the player is at (" << player.mTransform.mPosition[0] << ", "
+                             << player.mTransform.mPosition[1] << ", " << player.mTransform.mPosition[2] << ") in ("
+                             << player.mCell.mX << ", " << player.mCell.mY << ")";
+            mActiveCells = std::move(cells);
+        }
+
         ++mWorldRevision;
         flatbuffers::FlatBufferBuilder fbb;
         const mwue::GameTime time = makeGameTime(readGameTime());
@@ -535,7 +594,8 @@ namespace MWBridge
         {
             flatbuffers::FlatBufferBuilder fbb;
             std::vector<flatbuffers::Offset<mwue::CellId>> cells;
-            for (const CellInfo& cell : readActiveCells())
+            mActiveCells = readActiveCells();
+            for (const CellInfo& cell : mActiveCells)
                 cells.push_back(makeCell(fbb, cell));
             const auto activeCells = fbb.CreateVector(cells);
             const WeatherInfo weather = readWeather();
@@ -558,6 +618,8 @@ namespace MWBridge
             flatbuffers::FlatBufferBuilder fbb;
             send(fbb, mwue::Message::BootstrapEnd, mwue::CreateBootstrapEnd(fbb, bootstrapId, mWorldRevision), false);
         }
+        // From now on Unreal owns the player's body (fork stage R2).
+        releasePlayerBody();
         mPhase = Phase::Synchronized;
         Log(Debug::Info) << "MWUE bridge: bootstrap " << bootstrapId << " sent ("
                          << mwue::EnumNameBootstrapReason(reason) << ")";

@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "worldstate.hpp"
+
 namespace MWBridge
 {
     struct BridgeConfig
@@ -30,6 +32,8 @@ namespace MWBridge
         std::uint64_t mTick = 0;
         float mDt = 0.f;
         bool mMenu = false;
+        /// The player's facts, written into the world before the tick is simulated (fork stage R2).
+        std::optional<ActorFactsInfo> mPlayer;
     };
 
     /// The OpenMW end of the MWUE bridge (PROTOCOL.md in the OpenMW-Unreal repository).
