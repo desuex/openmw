@@ -116,6 +116,10 @@ add_openmw_dir (mwbase
     inputmanager windowmanager statemanager luamanager
     )
 
+add_openmw_dir (mwbridge
+    bridgeserver tcp
+    )
+
 # Main executable
 
 add_library(openmw-lib STATIC
@@ -227,6 +231,18 @@ endif()
 
 if (NOT UNIX)
     target_link_libraries(openmw-lib ${SDL2MAIN_LIBRARY})
+endif()
+
+# MWUE bridge: the protocol bindings and wire helpers (MIT) and the FlatBuffers runtime (Apache-2.0)
+# come from the OpenMW-Unreal repository that contains this fork as a submodule.
+set(MWUE_ROOT "${CMAKE_SOURCE_DIR}/.." CACHE PATH "Root of the OpenMW-Unreal repository")
+target_include_directories(openmw-lib PRIVATE
+    "${MWUE_ROOT}/protocol/cpp/include"
+    "${MWUE_ROOT}/protocol/generated/cpp"
+    "${MWUE_ROOT}/third_party/flatbuffers/include"
+)
+if (WIN32)
+    target_link_libraries(openmw-lib ws2_32)
 endif()
 
 # Fix for not visible pthreads functions for linker with glibc 2.15

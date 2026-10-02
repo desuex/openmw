@@ -157,6 +157,7 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
     engine.setActivationDistanceOverride(variables["activate-dist"].as<int>());
     engine.enableFontExport(variables["export-fonts"].as<bool>());
     engine.setRandomSeed(variables["random-seed"].as<unsigned int>());
+    engine.setBridge(variables["mwue-listen"].as<std::string>(), variables["mwue-token"].as<std::string>());
 
     return true;
 }

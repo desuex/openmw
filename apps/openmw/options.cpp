@@ -95,6 +95,12 @@ namespace OpenMW
         addOption("random-seed", bpo::value<unsigned int>()->default_value(Misc::Rng::generateDefaultSeed()),
             "seed value for random number generator");
 
+        addOption("mwue-listen", bpo::value<std::string>()->default_value(""),
+            "listen for the MWUE Unreal client on a loopback host:port, e.g. 127.0.0.1:47600");
+
+        addOption("mwue-token", bpo::value<std::string>()->default_value(""),
+            "auth token (hex) the MWUE client must present; empty disables the check");
+
         return desc;
     }
 }

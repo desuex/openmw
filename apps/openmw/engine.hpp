@@ -73,6 +73,11 @@ namespace MWState
     class StateManager;
 }
 
+namespace MWBridge
+{
+    class BridgeServer;
+}
+
 namespace MWGui
 {
     class WindowManager;
@@ -176,6 +181,10 @@ namespace OMW
         unsigned int mRandomSeed;
         Debug::Level mMaxRecastLogLevel = Debug::Error;
 
+        std::string mBridgeListen;
+        std::string mBridgeToken;
+        std::unique_ptr<MWBridge::BridgeServer> mBridge;
+
         Compiler::Extensions mExtensions;
         std::unique_ptr<Compiler::Context> mScriptContext;
 
@@ -263,6 +272,9 @@ namespace OMW
         void setSaveGameFile(const std::filesystem::path& savegame);
 
         void setRandomSeed(unsigned int seed);
+
+        /// Listen for the MWUE Unreal client on "host:port"; an empty address disables the bridge.
+        void setBridge(const std::string& listen, const std::string& token);
 
         void setRecastMaxLogLevel(Debug::Level value) { mMaxRecastLogLevel = value; }
     };

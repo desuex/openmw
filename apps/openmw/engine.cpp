@@ -83,6 +83,8 @@
 
 #include "mwstate/statemanagerimp.hpp"
 
+#include "mwbridge/bridgeserver.hpp"
+
 #include "profile.hpp"
 
 namespace
@@ -398,6 +400,8 @@ OMW::Engine::Engine(Files::ConfigurationManager& configurationManager)
 
 OMW::Engine::~Engine()
 {
+    mBridge = nullptr;
+
     if (mScreenCaptureOperation != nullptr)
     {
         mScreenCaptureOperation->stop();
@@ -1023,12 +1027,22 @@ void OMW::Engine::go()
         mWindowManager->executeInConsole(mStartupScript);
     }
 
+    if (!mBridgeListen.empty())
+    {
+        mBridge = std::make_unique<MWBridge::BridgeServer>(MWBridge::makeBridgeConfig(
+            mBridgeListen, mBridgeToken, "openmw " + std::string(Version::getVersion()) + " mwue"));
+        mBridge->start();
+    }
+
     // Start the main rendering loop
     MWWorld::DateTimeManager& timeManager = *mWorld->getTimeManager();
     Misc::FrameRateLimiter frameRateLimiter = Misc::makeFrameRateLimiter(mEnvironment.getFrameRateLimit());
     const std::chrono::steady_clock::duration maxSimulationInterval(std::chrono::milliseconds(200));
     while (!mViewer->done() && !mStateManager->hasQuitRequest())
     {
+        if (mBridge)
+            mBridge->poll();
+
         const double dt = std::chrono::duration_cast<std::chrono::duration<double>>(
                               std::min(frameRateLimiter.getLastFrameDuration(), maxSimulationInterval))
                               .count()
@@ -1067,6 +1081,9 @@ void OMW::Engine::go()
 
         frameRateLimiter.limit();
     }
+
+    if (mBridge)
+        mBridge->stop();
 
     mLuaWorker->join();
 
@@ -1129,4 +1146,10 @@ void OMW::Engine::setSaveGameFile(const std::filesystem::path& savegame)
 void OMW::Engine::setRandomSeed(unsigned int seed)
 {
     mRandomSeed = seed;
+}
+
+void OMW::Engine::setBridge(const std::string& listen, const std::string& token)
+{
+    mBridgeListen = listen;
+    mBridgeToken = token;
 }
