@@ -498,6 +498,10 @@ add_component_dir(navmeshtool
     protocol
     )
 
+add_component_dir(mwue
+    contentmanifest
+    )
+
 add_component_dir(platform
     platform
     file
@@ -639,6 +643,9 @@ else()
 endif()
 
 target_link_libraries(components ${BULLET_LIBRARIES})
+
+# OpenMW-Unreal: the header-only protocol helpers (MIT) used by components/mwue and its users.
+target_include_directories(components PUBLIC "${MWUE_ROOT}/protocol/cpp/include")
 
 if (USE_QT)
     add_library(components_qt STATIC ${COMPONENT_QT_FILES})

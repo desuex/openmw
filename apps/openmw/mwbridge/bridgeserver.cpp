@@ -15,6 +15,7 @@
 
 #include <components/debug/debuglog.hpp>
 
+#include <mwue/content.hpp>
 #include <mwue/wire.hpp>
 
 #include "../mwbase/environment.hpp"
@@ -104,16 +105,17 @@ namespace MWBridge
 
         flatbuffers::Offset<mwue::CellId> makeCell(flatbuffers::FlatBufferBuilder& fbb, const CellInfo& cell)
         {
-            const auto name = cell.mExterior ? flatbuffers::Offset<flatbuffers::String>() : fbb.CreateString(cell.mName);
+            const auto name
+                = cell.mExterior ? flatbuffers::Offset<flatbuffers::String>() : fbb.CreateString(cell.mName);
             return mwue::CreateCellId(
                 fbb, cell.mExterior ? mwue::CellKind::Exterior : mwue::CellKind::Interior, cell.mX, cell.mY, name);
         }
 
         mwue::Transform makeTransform(const TransformInfo& transform)
         {
-            return mwue::Transform(
-                mwue::Vec3(transform.mPosition[0], transform.mPosition[1], transform.mPosition[2]),
-                mwue::Quat(transform.mRotation[0], transform.mRotation[1], transform.mRotation[2], transform.mRotation[3]),
+            return mwue::Transform(mwue::Vec3(transform.mPosition[0], transform.mPosition[1], transform.mPosition[2]),
+                mwue::Quat(
+                    transform.mRotation[0], transform.mRotation[1], transform.mRotation[2], transform.mRotation[3]),
                 transform.mScale);
         }
 
@@ -457,8 +459,10 @@ namespace MWBridge
         const mwue::Uuid session(flatbuffers::span<const std::uint8_t, 16>(mSessionId.data(), mSessionId.size()));
         const auto name = fbb.CreateString("openmw");
         const auto build = fbb.CreateString(mConfig.mServerBuildId);
+        const auto manifestHashBytes = mwue::content::toBytes(mConfig.mContentManifestHash);
+        const auto manifestHash = fbb.CreateVector(manifestHashBytes.data(), manifestHashBytes.size());
         const auto features = fbb.CreateVectorOfStrings(std::begin(serverFeatures), std::end(serverFeatures));
-        const auto payload = mwue::CreateServerHello(fbb, name, build, &session, 0, features);
+        const auto payload = mwue::CreateServerHello(fbb, name, build, &session, manifestHash, features);
         send(fbb, mwue::Message::ServerHello, payload, false);
 
         mPhase = Phase::Ready;
@@ -535,9 +539,9 @@ namespace MWBridge
                 cells.push_back(makeCell(fbb, cell));
             const auto activeCells = fbb.CreateVector(cells);
             const WeatherInfo weather = readWeather();
-            const auto weatherState = mwue::CreateWeatherStateDirect(fbb, weather.mRegion.c_str(),
-                weather.mCurrent.c_str(), weather.mNext.empty() ? nullptr : weather.mNext.c_str(), weather.mTransition,
-                weather.mWind);
+            const auto weatherState
+                = mwue::CreateWeatherStateDirect(fbb, weather.mRegion.c_str(), weather.mCurrent.c_str(),
+                    weather.mNext.empty() ? nullptr : weather.mNext.c_str(), weather.mTransition, weather.mWind);
             const mwue::GameTime time = makeGameTime(readGameTime());
             send(fbb, mwue::Message::SessionState,
                 mwue::CreateSessionState(fbb, playerEntityId, &time, weatherState, activeCells, mConfig.mRandomSeed),

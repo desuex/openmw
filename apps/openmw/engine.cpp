@@ -46,6 +46,10 @@
 
 #include <components/misc/frameratelimiter.hpp>
 
+#include <components/mwue/contentmanifest.hpp>
+
+#include <mwue/content.hpp>
+
 #include <components/sceneutil/color.hpp>
 #include <components/sceneutil/depth.hpp>
 #include <components/sceneutil/screencapture.hpp>
@@ -1033,6 +1037,9 @@ void OMW::Engine::go()
         MWBridge::BridgeConfig config = MWBridge::makeBridgeConfig(mBridgeListen, mBridgeToken);
         config.mServerBuildId = "openmw " + std::string(Version::getVersion()) + " mwue";
         config.mRandomSeed = mRandomSeed;
+        const MWUE::ContentManifest manifest = MWUE::makeContentManifest(mContentFiles, mFileCollections);
+        config.mContentManifestHash = manifest.mHash;
+        Log(Debug::Info) << "MWUE bridge: content manifest " << mwue::content::toHex(manifest.mHash);
         mBridge = std::make_unique<MWBridge::BridgeServer>(std::move(config));
         mBridge->start();
     }

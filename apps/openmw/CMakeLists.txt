@@ -233,11 +233,9 @@ if (NOT UNIX)
     target_link_libraries(openmw-lib ${SDL2MAIN_LIBRARY})
 endif()
 
-# MWUE bridge: the protocol bindings and wire helpers (MIT) and the FlatBuffers runtime (Apache-2.0)
-# come from the OpenMW-Unreal repository that contains this fork as a submodule.
-set(MWUE_ROOT "${CMAKE_SOURCE_DIR}/.." CACHE PATH "Root of the OpenMW-Unreal repository")
+# MWUE bridge: the protocol bindings (MIT) and the FlatBuffers runtime (Apache-2.0) come from the
+# OpenMW-Unreal repository that contains this fork as a submodule (MWUE_ROOT, set in the root CMakeLists).
 target_include_directories(openmw-lib PRIVATE
-    "${MWUE_ROOT}/protocol/cpp/include"
     "${MWUE_ROOT}/protocol/generated/cpp"
     "${MWUE_ROOT}/third_party/flatbuffers/include"
 )

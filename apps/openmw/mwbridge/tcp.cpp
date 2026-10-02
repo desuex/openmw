@@ -109,8 +109,8 @@ namespace MWBridge
             throw std::runtime_error("MWUE bridge: socket() failed");
 #ifdef _WIN32
         const BOOL exclusive = TRUE;
-        setsockopt(socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive),
-            sizeof(exclusive));
+        setsockopt(
+            socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive), sizeof(exclusive));
 #else
         const int reuse = 1;
         setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
@@ -159,8 +159,8 @@ namespace MWBridge
         std::size_t sent = 0;
         while (valid() && sent < size)
         {
-            const auto result = ::send(toNative(mHandle), reinterpret_cast<const char*>(data + sent),
-                static_cast<int>(size - sent), flags);
+            const auto result = ::send(
+                toNative(mHandle), reinterpret_cast<const char*>(data + sent), static_cast<int>(size - sent), flags);
             if (result <= 0)
                 return false;
             sent += static_cast<std::size_t>(result);

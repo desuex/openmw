@@ -43,9 +43,13 @@ option(BUILD_COMPONENTS_TESTS   "Build components library tests" OFF)
 option(BUILD_BENCHMARKS         "Build benchmarks with Google Benchmark" OFF)
 option(BUILD_NAVMESHTOOL        "Build navmesh tool" ON)
 option(BUILD_BULLETOBJECTTOOL   "Build Bullet object tool" ON)
+option(BUILD_MWUE_EXPORTER      "Build the OpenMW-Unreal content cache exporter" ON)
 option(BUILD_OPENCS_TESTS       "Build OpenMW Construction Set tests" OFF)
 option(BUILD_OPENMW_TESTS       "Build OpenMW tests" OFF)
 option(PRECOMPILE_HEADERS_WITH_MSVC "Precompile most common used headers with MSVC (alternative to ccache)" ON)
+
+# OpenMW-Unreal: the repository that contains this fork, for the shared MIT protocol headers.
+set(MWUE_ROOT "${CMAKE_SOURCE_DIR}/.." CACHE PATH "Root of the OpenMW-Unreal repository")
 
 set(OpenGL_GL_PREFERENCE LEGACY)  # Use LEGACY as we use GL2; GLNVD is for GL3 and up.
 
@@ -728,6 +732,10 @@ endif()
 
 if (BUILD_BULLETOBJECTTOOL)
     add_subdirectory(apps/bulletobjecttool)
+endif()
+
+if (BUILD_MWUE_EXPORTER)
+    add_subdirectory(apps/mwue-exporter)
 endif()
 
 if (BUILD_OPENCS_TESTS)

@@ -6,10 +6,12 @@
 #include <string>
 #include <vector>
 
+#include <mwue/content.hpp>
+
 namespace MWBridge
 {
     /// The player is a runtime object with a fixed EntityId (high bit set).
-    constexpr std::uint64_t playerEntityId = (std::uint64_t(1) << 63) | 1;
+    constexpr std::uint64_t playerEntityId = mwue::content::PlayerEntityId;
 
     struct GameTimeInfo
     {

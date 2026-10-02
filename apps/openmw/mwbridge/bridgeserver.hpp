@@ -17,6 +17,8 @@ namespace MWBridge
         std::vector<std::uint8_t> mToken;
         std::string mServerBuildId;
         std::uint64_t mRandomSeed = 0;
+        /// Selects the content cache on the Unreal side (PROTOCOL.md §20).
+        std::uint64_t mContentManifestHash = 0;
     };
 
     /// Parses "host:port" and a hex token. Throws std::runtime_error on malformed input.
