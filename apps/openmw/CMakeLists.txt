@@ -117,7 +117,7 @@ add_openmw_dir (mwbase
     )
 
 add_openmw_dir (mwbridge
-    bridgeserver tcp
+    bridgeserver tcp worldstate
     )
 
 # Main executable

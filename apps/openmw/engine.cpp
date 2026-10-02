@@ -3,6 +3,7 @@
 #include <cerrno>
 #include <chrono>
 #include <future>
+#include <optional>
 #include <system_error>
 
 #include <osgDB/ReaderWriter>
@@ -1029,8 +1030,10 @@ void OMW::Engine::go()
 
     if (!mBridgeListen.empty())
     {
-        mBridge = std::make_unique<MWBridge::BridgeServer>(MWBridge::makeBridgeConfig(
-            mBridgeListen, mBridgeToken, "openmw " + std::string(Version::getVersion()) + " mwue"));
+        MWBridge::BridgeConfig config = MWBridge::makeBridgeConfig(mBridgeListen, mBridgeToken);
+        config.mServerBuildId = "openmw " + std::string(Version::getVersion()) + " mwue";
+        config.mRandomSeed = mRandomSeed;
+        mBridge = std::make_unique<MWBridge::BridgeServer>(std::move(config));
         mBridge->start();
     }
 
@@ -1038,15 +1041,42 @@ void OMW::Engine::go()
     MWWorld::DateTimeManager& timeManager = *mWorld->getTimeManager();
     Misc::FrameRateLimiter frameRateLimiter = Misc::makeFrameRateLimiter(mEnvironment.getFrameRateLimit());
     const std::chrono::steady_clock::duration maxSimulationInterval(std::chrono::milliseconds(200));
+    bool warnedSkippedTicks = false;
     while (!mViewer->done() && !mStateManager->hasQuitRequest())
     {
+        double dt = 0;
+        std::optional<MWBridge::TickRequest> tick;
         if (mBridge)
-            mBridge->poll();
-
-        const double dt = std::chrono::duration_cast<std::chrono::duration<double>>(
-                              std::min(frameRateLimiter.getLastFrameDuration(), maxSimulationInterval))
-                              .count()
-            * timeManager.getSimulationTimeScale();
+        {
+            // With the bridge on, the simulation advances only on ticks from Unreal (PROTOCOL.md §12).
+            tick = mBridge->poll();
+            if (!tick)
+            {
+                // Keep the debug window responsive between ticks.
+                SDL_PumpEvents();
+                if (SDL_HasEvent(SDL_QUIT))
+                    break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            if (tick->mMenu)
+            {
+                // Menu-mode ticks (MenuMode true, world frozen) arrive with fork stage R4.
+                if (!warnedSkippedTicks)
+                    Log(Debug::Warning) << "MWUE bridge: menu-mode ticks are not simulated yet";
+                warnedSkippedTicks = true;
+                mBridge->tickDone(*tick);
+                continue;
+            }
+            dt = tick->mDt * timeManager.getSimulationTimeScale();
+        }
+        else
+        {
+            dt = std::chrono::duration_cast<std::chrono::duration<double>>(
+                     std::min(frameRateLimiter.getLastFrameDuration(), maxSimulationInterval))
+                     .count()
+                * timeManager.getSimulationTimeScale();
+        }
 
         mViewer->advance(timeManager.getRenderingSimulationTime());
 
@@ -1054,6 +1084,14 @@ void OMW::Engine::go()
 
         if (!frame(frameNumber, static_cast<float>(dt)))
         {
+            if (tick)
+            {
+                // frame() skips everything while the window is minimized.
+                if (!warnedSkippedTicks)
+                    Log(Debug::Warning) << "MWUE bridge: ticks are not simulated while the window is minimized";
+                warnedSkippedTicks = true;
+                mBridge->tickDone(*tick);
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
@@ -1063,6 +1101,9 @@ void OMW::Engine::go()
             timeManager.setSimulationTime(timeManager.getSimulationTime() + dt);
             timeManager.setRenderingSimulationTime(timeManager.getRenderingSimulationTime() + dt);
         }
+
+        if (tick)
+            mBridge->tickDone(*tick);
 
         if (stats)
         {
@@ -1079,7 +1120,9 @@ void OMW::Engine::go()
             }
         }
 
-        frameRateLimiter.limit();
+        // Ticks pace the loop when the bridge is on.
+        if (!mBridge)
+            frameRateLimiter.limit();
     }
 
     if (mBridge)

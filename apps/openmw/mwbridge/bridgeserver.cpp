@@ -17,7 +17,11 @@
 
 #include <mwue/wire.hpp>
 
+#include "../mwbase/environment.hpp"
+#include "../mwbase/statemanager.hpp"
+
 #include "tcp.hpp"
+#include "worldstate.hpp"
 
 namespace MWBridge
 {
@@ -30,6 +34,9 @@ namespace MWBridge
         constexpr std::chrono::milliseconds ioPoll{ 5 };
         constexpr std::chrono::seconds preambleTimeout{ 5 };
         constexpr std::chrono::seconds closeGrace{ 1 };
+
+        /// Unreal merges ticks up to this simulation step (PROTOCOL.md §12).
+        constexpr float maxTickDt = 0.25f;
 
         const char* const serverFeatures[] = { "bootstrap_v2", "tick_v1", "activation_v1" };
 
@@ -95,6 +102,26 @@ namespace MWBridge
             return text != nullptr ? text->string_view() : std::string_view();
         }
 
+        flatbuffers::Offset<mwue::CellId> makeCell(flatbuffers::FlatBufferBuilder& fbb, const CellInfo& cell)
+        {
+            const auto name = cell.mExterior ? flatbuffers::Offset<flatbuffers::String>() : fbb.CreateString(cell.mName);
+            return mwue::CreateCellId(
+                fbb, cell.mExterior ? mwue::CellKind::Exterior : mwue::CellKind::Interior, cell.mX, cell.mY, name);
+        }
+
+        mwue::Transform makeTransform(const TransformInfo& transform)
+        {
+            return mwue::Transform(
+                mwue::Vec3(transform.mPosition[0], transform.mPosition[1], transform.mPosition[2]),
+                mwue::Quat(transform.mRotation[0], transform.mRotation[1], transform.mRotation[2], transform.mRotation[3]),
+                transform.mScale);
+        }
+
+        mwue::GameTime makeGameTime(const GameTimeInfo& time)
+        {
+            return mwue::GameTime(time.mDay, time.mMonth, time.mYear, time.mHour, time.mTimeScale);
+        }
+
         enum class InboundKind
         {
             Connected,
@@ -119,7 +146,7 @@ namespace MWBridge
         };
     }
 
-    BridgeConfig makeBridgeConfig(const std::string& listen, const std::string& tokenHex, std::string serverBuildId)
+    BridgeConfig makeBridgeConfig(const std::string& listen, const std::string& tokenHex)
     {
         const std::size_t colon = listen.rfind(':');
         if (colon == std::string::npos || colon == 0 || colon + 1 == listen.size())
@@ -131,10 +158,9 @@ namespace MWBridge
             throw std::runtime_error("MWUE bridge: invalid port '" + portText + "'");
 
         BridgeConfig config;
-        config.host = listen.substr(0, colon);
-        config.port = static_cast<std::uint16_t>(std::stoi(portText));
-        config.token = parseHex(tokenHex);
-        config.serverBuildId = std::move(serverBuildId);
+        config.mHost = listen.substr(0, colon);
+        config.mPort = static_cast<std::uint16_t>(std::stoi(portText));
+        config.mToken = parseHex(tokenHex);
         return config;
     }
 
@@ -144,7 +170,8 @@ namespace MWBridge
         {
             Disconnected,
             AwaitingHello,
-            Ready,
+            Ready, // handshake done
+            Synchronized, // bootstrap sent; ticks accepted
         };
 
         explicit Impl(BridgeConfig config)
@@ -158,16 +185,19 @@ namespace MWBridge
         void push(Inbound item);
 
         // Main thread
-        void poll();
-        void handle(const mwue::Envelope& envelope);
+        std::optional<TickRequest> poll();
+        std::optional<TickRequest> handle(const mwue::Envelope& envelope);
         void handleHello(const mwue::ClientHello& hello);
         void handleQuit(const mwue::QuitSession& quit);
+        std::optional<TickRequest> acceptTick(const mwue::Tick& tick);
+        void tickDone(const TickRequest& tick);
+        void sendBootstrap(mwue::BootstrapReason reason);
         void reject(mwue::HandshakeRejectReason reason, const std::string& message);
         void sendError(mwue::ErrorCode code, mwue::Severity severity, const std::string& message, bool closeAfter);
 
         template <class Payload>
         void send(flatbuffers::FlatBufferBuilder& fbb, mwue::Message type, flatbuffers::Offset<Payload> payload,
-            bool closeAfter);
+            bool closeAfter, std::uint64_t tick = 0);
 
         BridgeConfig mConfig;
         SocketLibrary mSocketLibrary;
@@ -181,9 +211,14 @@ namespace MWBridge
         std::deque<Outbound> mOutbound;
 
         // Main thread only.
+        std::deque<Inbound> mBacklog;
         Phase mPhase = Phase::Disconnected;
         std::uint64_t mConnection = 0;
         std::uint64_t mNextSequence = 1;
+        std::uint64_t mLastTick = 0;
+        std::uint64_t mBootstrapCounter = 0;
+        std::uint64_t mWorldRevision = 1;
+        bool mWarnedLongTick = false;
         const SessionId mSessionId = makeSessionId();
     };
 
@@ -306,21 +341,24 @@ namespace MWBridge
         push({ InboundKind::Disconnected, connection, {} });
     }
 
-    void BridgeServer::Impl::poll()
+    std::optional<TickRequest> BridgeServer::Impl::poll()
     {
-        std::deque<Inbound> items;
         {
             const std::lock_guard lock(mMutex);
-            items.swap(mInbound);
+            std::move(mInbound.begin(), mInbound.end(), std::back_inserter(mBacklog));
+            mInbound.clear();
         }
-        for (const Inbound& item : items)
+        while (!mBacklog.empty())
         {
+            const Inbound item = std::move(mBacklog.front());
+            mBacklog.pop_front();
             switch (item.mKind)
             {
                 case InboundKind::Connected:
                     mConnection = item.mConnection;
                     mPhase = Phase::AwaitingHello;
                     mNextSequence = 1;
+                    mLastTick = 0;
                     Log(Debug::Info) << "MWUE bridge: client connected";
                     break;
                 case InboundKind::Disconnected:
@@ -341,38 +379,52 @@ namespace MWBridge
                     break;
                 case InboundKind::Frame:
                     if (item.mConnection == mConnection)
-                        handle(*mwue::wire::envelopeOf(item.mFrame));
+                    {
+                        if (std::optional<TickRequest> tick = handle(*mwue::wire::envelopeOf(item.mFrame)))
+                            return tick;
+                    }
                     break;
             }
         }
+        return std::nullopt;
     }
 
-    void BridgeServer::Impl::handle(const mwue::Envelope& envelope)
+    std::optional<TickRequest> BridgeServer::Impl::handle(const mwue::Envelope& envelope)
     {
         const mwue::Message type = envelope.payload_type();
         if (type == mwue::Message::NONE || envelope.payload() == nullptr)
         {
             sendError(mwue::ErrorCode::InvalidMessage, mwue::Severity::Fatal, "envelope without payload", true);
-            return;
+            return std::nullopt;
         }
         if (type == mwue::Message::ClientHello)
         {
             handleHello(*envelope.payload_as_ClientHello());
-            return;
+            return std::nullopt;
         }
         if (type == mwue::Message::QuitSession)
         {
             handleQuit(*envelope.payload_as_QuitSession());
-            return;
+            return std::nullopt;
         }
-        if (mPhase != Phase::Ready)
+        if (mPhase != Phase::Ready && mPhase != Phase::Synchronized)
         {
             sendError(mwue::ErrorCode::InvalidMessage, mwue::Severity::Fatal, "ClientHello expected", true);
-            return;
+            return std::nullopt;
         }
-        // Bootstrap, ticks and activation arrive in the next steps of fork stage R1.
-        sendError(mwue::ErrorCode::UnsupportedFeature, mwue::Severity::Recoverable,
-            std::string(mwue::EnumNameMessage(type)) + " is not implemented yet", false);
+        switch (type)
+        {
+            case mwue::Message::RequestBootstrap:
+                sendBootstrap(envelope.payload_as_RequestBootstrap()->reason());
+                return std::nullopt;
+            case mwue::Message::Tick:
+                return acceptTick(*envelope.payload_as_Tick());
+            default:
+                // Activation and orders arrive with the later fork stages.
+                sendError(mwue::ErrorCode::UnsupportedFeature, mwue::Severity::Recoverable,
+                    std::string(mwue::EnumNameMessage(type)) + " is not implemented yet", false);
+                return std::nullopt;
+        }
     }
 
     void BridgeServer::Impl::handleHello(const mwue::ClientHello& hello)
@@ -382,11 +434,11 @@ namespace MWBridge
             sendError(mwue::ErrorCode::InvalidMessage, mwue::Severity::Fatal, "duplicate ClientHello", true);
             return;
         }
-        if (!mConfig.token.empty())
+        if (!mConfig.mToken.empty())
         {
             const flatbuffers::Vector<std::uint8_t>* token = hello.auth_token();
             if (token == nullptr
-                || !std::equal(token->begin(), token->end(), mConfig.token.begin(), mConfig.token.end()))
+                || !std::equal(token->begin(), token->end(), mConfig.mToken.begin(), mConfig.mToken.end()))
             {
                 reject(mwue::HandshakeRejectReason::Unauthorized, "wrong auth token");
                 return;
@@ -404,7 +456,7 @@ namespace MWBridge
         flatbuffers::FlatBufferBuilder fbb;
         const mwue::Uuid session(flatbuffers::span<const std::uint8_t, 16>(mSessionId.data(), mSessionId.size()));
         const auto name = fbb.CreateString("openmw");
-        const auto build = fbb.CreateString(mConfig.serverBuildId);
+        const auto build = fbb.CreateString(mConfig.mServerBuildId);
         const auto features = fbb.CreateVectorOfStrings(std::begin(serverFeatures), std::end(serverFeatures));
         const auto payload = mwue::CreateServerHello(fbb, name, build, &session, 0, features);
         send(fbb, mwue::Message::ServerHello, payload, false);
@@ -422,6 +474,89 @@ namespace MWBridge
         const auto payload = mwue::CreateSessionEnding(fbb, mwue::SessionEndReason::ClientQuit);
         send(fbb, mwue::Message::SessionEnding, payload, true);
         mPhase = Phase::Disconnected;
+    }
+
+    std::optional<TickRequest> BridgeServer::Impl::acceptTick(const mwue::Tick& tick)
+    {
+        if (mPhase != Phase::Synchronized)
+        {
+            sendError(mwue::ErrorCode::BootstrapRequired, mwue::Severity::Recoverable, "Tick before bootstrap", false);
+            return std::nullopt;
+        }
+        if (tick.tick() <= mLastTick || !(tick.dt() >= 0.f))
+        {
+            sendError(mwue::ErrorCode::InvalidRequest, mwue::Severity::Recoverable,
+                "Tick " + std::to_string(tick.tick()) + " is out of order or has an invalid dt", false);
+            return std::nullopt;
+        }
+        mLastTick = tick.tick();
+
+        float dt = tick.dt();
+        if (dt > maxTickDt)
+        {
+            if (!mWarnedLongTick)
+                Log(Debug::Warning) << "MWUE bridge: clamping tick dt " << dt << " s to " << maxTickDt << " s";
+            mWarnedLongTick = true;
+            dt = maxTickDt;
+        }
+        return TickRequest{ tick.tick(), dt, tick.mode() == mwue::TickMode::Menu };
+    }
+
+    void BridgeServer::Impl::tickDone(const TickRequest& tick)
+    {
+        if (mPhase != Phase::Synchronized)
+            return; // the client left while the tick was simulated
+        ++mWorldRevision;
+        flatbuffers::FlatBufferBuilder fbb;
+        const mwue::GameTime time = makeGameTime(readGameTime());
+        send(fbb, mwue::Message::TickDone, mwue::CreateTickDone(fbb, tick.mTick, &time, mWorldRevision), false,
+            tick.mTick);
+    }
+
+    void BridgeServer::Impl::sendBootstrap(mwue::BootstrapReason reason)
+    {
+        if (MWBase::Environment::get().getStateManager()->getState() != MWBase::StateManager::State_Running)
+        {
+            sendError(mwue::ErrorCode::InternalError, mwue::Severity::Recoverable, "no game is running", false);
+            return;
+        }
+
+        // R1 bootstrap: session state and the player. Entity deltas follow with the content cache (§11).
+        const std::uint64_t bootstrapId = ++mBootstrapCounter;
+        {
+            flatbuffers::FlatBufferBuilder fbb;
+            send(fbb, mwue::Message::BootstrapBegin, mwue::CreateBootstrapBegin(fbb, bootstrapId, mWorldRevision),
+                false);
+        }
+        {
+            flatbuffers::FlatBufferBuilder fbb;
+            std::vector<flatbuffers::Offset<mwue::CellId>> cells;
+            for (const CellInfo& cell : readActiveCells())
+                cells.push_back(makeCell(fbb, cell));
+            const auto activeCells = fbb.CreateVector(cells);
+            const WeatherInfo weather = readWeather();
+            const auto weatherState = mwue::CreateWeatherStateDirect(fbb, weather.mRegion.c_str(),
+                weather.mCurrent.c_str(), weather.mNext.empty() ? nullptr : weather.mNext.c_str(), weather.mTransition,
+                weather.mWind);
+            const mwue::GameTime time = makeGameTime(readGameTime());
+            send(fbb, mwue::Message::SessionState,
+                mwue::CreateSessionState(fbb, playerEntityId, &time, weatherState, activeCells, mConfig.mRandomSeed),
+                false);
+        }
+        {
+            flatbuffers::FlatBufferBuilder fbb;
+            const PlayerInfo player = readPlayer();
+            const auto cell = makeCell(fbb, player.mCell);
+            const mwue::Transform transform = makeTransform(player.mTransform);
+            send(fbb, mwue::Message::PlayerInit, mwue::CreatePlayerInit(fbb, playerEntityId, cell, &transform), false);
+        }
+        {
+            flatbuffers::FlatBufferBuilder fbb;
+            send(fbb, mwue::Message::BootstrapEnd, mwue::CreateBootstrapEnd(fbb, bootstrapId, mWorldRevision), false);
+        }
+        mPhase = Phase::Synchronized;
+        Log(Debug::Info) << "MWUE bridge: bootstrap " << bootstrapId << " sent ("
+                         << mwue::EnumNameBootstrapReason(reason) << ")";
     }
 
     void BridgeServer::Impl::reject(mwue::HandshakeRejectReason reason, const std::string& message)
@@ -446,14 +581,14 @@ namespace MWBridge
     }
 
     template <class Payload>
-    void BridgeServer::Impl::send(
-        flatbuffers::FlatBufferBuilder& fbb, mwue::Message type, flatbuffers::Offset<Payload> payload, bool closeAfter)
+    void BridgeServer::Impl::send(flatbuffers::FlatBufferBuilder& fbb, mwue::Message type,
+        flatbuffers::Offset<Payload> payload, bool closeAfter, std::uint64_t tick)
     {
         if (mConnection == 0)
             return;
         const mwue::Uuid session(flatbuffers::span<const std::uint8_t, 16>(mSessionId.data(), mSessionId.size()));
         const auto envelope = mwue::CreateEnvelope(
-            fbb, &session, mNextSequence++, 0, mwue::EnvelopeFlags::NONE, type, payload.Union());
+            fbb, &session, mNextSequence++, tick, mwue::EnvelopeFlags::NONE, type, payload.Union());
         Frame frame = mwue::wire::finishFrame(fbb, envelope);
         const std::lock_guard lock(mMutex);
         mOutbound.push_back({ mConnection, std::move(frame), closeAfter });
@@ -471,15 +606,21 @@ namespace MWBridge
 
     void BridgeServer::start()
     {
-        mImpl->mListener = TcpSocket::listen(mImpl->mConfig.host, mImpl->mConfig.port);
+        mImpl->mListener = TcpSocket::listen(mImpl->mConfig.mHost, mImpl->mConfig.mPort);
         mImpl->mThread = std::thread([impl = mImpl.get()] { impl->run(); });
-        Log(Debug::Info) << "MWUE bridge: listening on " << mImpl->mConfig.host << ":" << mImpl->mConfig.port
-                         << (mImpl->mConfig.token.empty() ? " (no auth token)" : "");
+        Log(Debug::Info) << "MWUE bridge: listening on " << mImpl->mConfig.mHost << ":" << mImpl->mConfig.mPort
+                         << (mImpl->mConfig.mToken.empty() ? " (no auth token)" : "")
+                         << "; the simulation advances only on ticks from Unreal";
     }
 
-    void BridgeServer::poll()
+    std::optional<TickRequest> BridgeServer::poll()
     {
-        mImpl->poll();
+        return mImpl->poll();
+    }
+
+    void BridgeServer::tickDone(const TickRequest& tick)
+    {
+        mImpl->tickDone(tick);
     }
 
     void BridgeServer::stop()
