@@ -275,7 +275,7 @@ namespace MwueExporter
             return bounds;
         }
 
-        int runExporter(int argc, char* argv[])
+        int exportContent(int argc, char* argv[])
         {
             Platform::init();
 
@@ -478,7 +478,16 @@ namespace MwueExporter
                 std::filesystem::remove(temporary, ignored);
                 throw;
             }
-            std::filesystem::rename(temporary, output);
+            std::error_code renameError;
+            std::filesystem::rename(temporary, output, renameError);
+            if (renameError)
+            {
+                // Unreal's SQLite layer holds a cache it has open exclusively, so it can't be replaced.
+                std::error_code ignored;
+                std::filesystem::remove(temporary, ignored);
+                throw std::runtime_error("Failed to replace " + Files::pathToUnicodeString(output) + ": "
+                    + renameError.message() + " (is it open in Unreal?)");
+            }
 
             const auto seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
             Log(Debug::Info) << "Exported " << cells.size() << " cells, " << refCount - duplicateRefs << " references, "
@@ -490,6 +499,21 @@ namespace MwueExporter
                              << " models failed to load";
             Log(Debug::Info) << "Content cache: " << output;
             return 0;
+        }
+
+        int runExporter(int argc, char* argv[])
+        {
+            // Report fatal errors on the console and in the log only. Debug::wrapApplication would also show a
+            // message box on Windows, which blocks unattended runs such as the launcher's.
+            try
+            {
+                return exportContent(argc, argv);
+            }
+            catch (const std::exception& e)
+            {
+                Log(Debug::Error) << "Fatal error: " << e.what();
+                return 1;
+            }
         }
     }
 }
